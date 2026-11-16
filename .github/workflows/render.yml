@@ -1,0 +1,119 @@
+name: render
+
+# Renders a Blender Kit scene with the kit's own runner (scripts/render_blender.py).
+# Free GitHub runners have no GPU, so EEVEE renders through Mesa's llvmpipe (software OpenGL)
+# under a virtual display. One render at a time, same as the kit requires on a PC.
+on:
+  workflow_dispatch:
+    inputs:
+      scene:
+        description: "Path to the scene script in this repo"
+        required: true
+        default: "shots/my-first-10k/my-first-10k.py"
+      out:
+        description: "Output file (.mp4 full frame, .mov with --alpha)"
+        required: true
+        default: "shots/my-first-10k/my-first-10k.mp4"
+      frames:
+        description: "Frames (default 30 fps, so 150 = 5 seconds)"
+        required: true
+        default: "150"
+      size:
+        description: "Width x Height"
+        required: true
+        default: "1920x1080"
+      stills:
+        description: "Optional: render only these frames as PNGs (e.g. 1,44,150) for a check"
+        required: false
+        default: ""
+      args:
+        description: "Scene values, name=value pairs separated by | (e.g. title=MY SHOT|gold=SHOT)"
+        required: false
+        default: ""
+      max_minutes:
+        description: "Stop if the projected render is longer than this many minutes"
+        required: true
+        default: "15"
+      time_ok:
+        description: "The user accepted a render longer than max_minutes"
+        type: boolean
+        default: false
+      long_ok:
+        description: "The user asked for a shot longer than 30 seconds"
+        type: boolean
+        default: false
+      alpha:
+        description: "Overlay render (ProRes 4444 .mov with transparency); --out must end in .mov"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blender-render
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install FFmpeg and a virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg xvfb
+
+      - name: Install Blender 5.3.0 (same version as the local kit)
+        run: |
+          curl --retry 3 -fL -o /tmp/blender.tar.xz https://download.blender.org/release/Blender5.3/blender-5.3.0-linux-x64.tar.xz
+          mkdir -p "$HOME/blender"
+          tar -xJf /tmp/blender.tar.xz -C "$HOME/blender" --strip-components=1
+          echo "$HOME/blender" >> "$GITHUB_PATH"
+          blender --version
+
+      - name: Render
+        env:
+          SCENE: ${{ inputs.scene }}
+          OUT: ${{ inputs.out }}
+          FRAMES: ${{ inputs.frames }}
+          SIZE: ${{ inputs.size }}
+          STILLS: ${{ inputs.stills }}
+          ARGS: ${{ inputs.args }}
+          MAX_MINUTES: ${{ inputs.max_minutes }}
+          TIME_OK: ${{ inputs.time_ok }}
+          LONG_OK: ${{ inputs.long_ok }}
+          ALPHA: ${{ inputs.alpha }}
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          set -o pipefail
+          EXTRA=()
+          [ "$TIME_OK" = "true" ] && EXTRA+=(--time-ok)
+          [ "$LONG_OK" = "true" ] && EXTRA+=(--long-ok)
+          [ "$ALPHA" = "true" ] && EXTRA+=(--alpha)
+          if [ -n "$STILLS" ]; then
+            EXTRA+=(--stills "$STILLS")
+          fi
+          ARGS_FLAGS=()
+          if [ -n "$ARGS" ]; then
+            IFS='|' read -ra PAIRS <<< "$ARGS"
+            for p in "${PAIRS[@]}"; do
+              ARGS_FLAGS+=(--arg "$p")
+            done
+          fi
+          xvfb-run -a -s "-screen 0 1920x1080x24" \
+            python3 scripts/render_blender.py "$SCENE" \
+            --out "$OUT" --frames "$FRAMES" --size "$SIZE" \
+            --max-minutes "$MAX_MINUTES" \
+            "${EXTRA[@]}" "${ARGS_FLAGS[@]}"
+
+      - name: Upload the render
+        uses: actions/upload-artifact@v4
+        with:
+          name: render-${{ github.run_number }}
+          path: |
+            ${{ inputs.out }}
+            **/*-still-*.png
+          if-no-files-found: ignore
